@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Dict, Any, List, Union
+import struct
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -186,12 +187,26 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
 # Create the MCP server with lifespan support
 mcp = FastMCP(
     "AbletonMCP",
-    description="Ableton Live integration through the Model Context Protocol",
+    instructions="Ableton Live integration through the Model Context Protocol",
     lifespan=server_lifespan
 )
 
 # Global connection for resources
 _ableton_connection = None
+
+# Max for Live communication
+MAX_UDP_PORT = 9878
+MAX_HOST = "127.0.0.1"
+
+def send_to_max(message: str):
+    """Send OSC-style message to Max for Live device"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(message.encode('utf-8'), (MAX_HOST, MAX_UDP_PORT))
+        sock.close()
+        logger.info(f"Sent to Max: {message}")
+    except Exception as e:
+        logger.error(f"Error sending to Max: {str(e)}")
 
 def get_ableton_connection():
     """Get or create a persistent Ableton connection"""
@@ -651,6 +666,393 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) 
     except Exception as e:
         logger.error(f"Error loading drum kit: {str(e)}")
         return f"Error loading drum kit: {str(e)}"
+
+# Arrangement View Functions
+
+@mcp.tool()
+def get_arrangement_info(ctx: Context) -> str:
+    """
+    Get information about the current arrangement view state.
+    
+    Returns info about playback position, loop settings, and arrangement length.
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_arrangement_info")
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting arrangement info: {str(e)}")
+        return f"Error getting arrangement info: {str(e)}"
+
+@mcp.tool()
+def set_arrangement_position(ctx: Context, time: float) -> str:
+    """
+    Set the current playback position in the arrangement view.
+    
+    Parameters:
+    - time: The time position in beats to jump to
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_arrangement_position", {"time": time})
+        return f"Set arrangement position to {time} beats"
+    except Exception as e:
+        logger.error(f"Error setting arrangement position: {str(e)}")
+        return f"Error setting arrangement position: {str(e)}"
+
+@mcp.tool()
+def get_arrangement_tracks(ctx: Context) -> str:
+    """
+    Get information about all tracks in the arrangement view.
+    
+    Returns detailed info about clips in the arrangement for each track.
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_arrangement_tracks")
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting arrangement tracks: {str(e)}")
+        return f"Error getting arrangement tracks: {str(e)}"
+
+@mcp.tool()
+def create_arrangement_clip(
+    ctx: Context, 
+    track_index: int, 
+    start_time: float, 
+    length: float
+) -> str:
+    """
+    Create a new clip in the arrangement view.
+    
+    Parameters:
+    - track_index: The index of the track to create the clip on
+    - start_time: The start time of the clip in beats
+    - length: The length of the clip in beats
+    
+    Note: This uses Max for Live for actual arrangement clip creation.
+    Make sure ArrangementHelper.amxd is loaded on your Master track!
+    """
+    try:
+        # Send to Max for Live device
+        send_to_max(f"/arrangement/create_clip {track_index} {start_time} {length}")
+        
+        # Also try the Remote Script method as fallback
+        try:
+            ableton = get_ableton_connection()
+            result = ableton.send_command("create_arrangement_clip", {
+                "track_index": track_index,
+                "start_time": start_time,
+                "length": length
+            })
+        except:
+            pass  # Remote Script method might not work, but Max method should
+        
+        return f"Sent create clip command: track {track_index} at {start_time} beats, length {length} beats"
+    except Exception as e:
+        logger.error(f"Error creating arrangement clip: {str(e)}")
+        return f"Error creating arrangement clip: {str(e)}"
+
+@mcp.tool()
+def move_arrangement_clip(
+    ctx: Context,
+    track_index: int,
+    clip_index: int,
+    new_start_time: float
+) -> str:
+    """
+    Move a clip to a new position in the arrangement.
+    
+    Parameters:
+    - track_index: The index of the track containing the clip
+    - clip_index: The index of the clip to move
+    - new_start_time: The new start time in beats
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("move_arrangement_clip", {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "new_start_time": new_start_time
+        })
+        return f"Moved clip to {new_start_time} beats"
+    except Exception as e:
+        logger.error(f"Error moving arrangement clip: {str(e)}")
+        return f"Error moving arrangement clip: {str(e)}"
+
+@mcp.tool()
+def resize_arrangement_clip(
+    ctx: Context,
+    track_index: int,
+    clip_index: int,
+    new_start: float,
+    new_end: float
+) -> str:
+    """
+    Resize a clip in the arrangement view.
+    
+    Parameters:
+    - track_index: The index of the track containing the clip
+    - clip_index: The index of the clip to resize
+    - new_start: The new start time in beats
+    - new_end: The new end time in beats
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("resize_arrangement_clip", {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "new_start": new_start,
+            "new_end": new_end
+        })
+        return f"Resized clip to start at {new_start} and end at {new_end} beats"
+    except Exception as e:
+        logger.error(f"Error resizing arrangement clip: {str(e)}")
+        return f"Error resizing arrangement clip: {str(e)}"
+
+@mcp.tool()
+def delete_arrangement_clip(
+    ctx: Context,
+    track_index: int,
+    clip_index: int
+) -> str:
+    """
+    Delete a clip from the arrangement view.
+    
+    Parameters:
+    - track_index: The index of the track containing the clip
+    - clip_index: The index of the clip to delete
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("delete_arrangement_clip", {
+            "track_index": track_index,
+            "clip_index": clip_index
+        })
+        return f"Deleted clip from track {track_index}"
+    except Exception as e:
+        logger.error(f"Error deleting arrangement clip: {str(e)}")
+        return f"Error deleting arrangement clip: {str(e)}"
+
+@mcp.tool()
+def select_arrangement_region(
+    ctx: Context,
+    start_time: float,
+    end_time: float,
+    track_indices: List[int] = None
+) -> str:
+    """
+    Select a region in the arrangement view.
+    
+    Parameters:
+    - start_time: The start time of the selection in beats
+    - end_time: The end time of the selection in beats
+    - track_indices: List of track indices to include (None = all tracks)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("select_arrangement_region", {
+            "start_time": start_time,
+            "end_time": end_time,
+            "track_indices": track_indices
+        })
+        tracks_msg = f"tracks {track_indices}" if track_indices else "all tracks"
+        return f"Selected region from {start_time} to {end_time} beats on {tracks_msg}"
+    except Exception as e:
+        logger.error(f"Error selecting arrangement region: {str(e)}")
+        return f"Error selecting arrangement region: {str(e)}"
+
+@mcp.tool()
+def copy_arrangement_region(ctx: Context) -> str:
+    """
+    Copy the currently selected arrangement region.
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("copy_arrangement_region")
+        return "Copied selected arrangement region"
+    except Exception as e:
+        logger.error(f"Error copying arrangement region: {str(e)}")
+        return f"Error copying arrangement region: {str(e)}"
+
+@mcp.tool()
+def paste_arrangement_region(ctx: Context, time: float) -> str:
+    """
+    Paste the copied arrangement region at a specific time.
+    
+    Parameters:
+    - time: The time position in beats to paste at
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("paste_arrangement_region", {"time": time})
+        return f"Pasted arrangement region at {time} beats"
+    except Exception as e:
+        logger.error(f"Error pasting arrangement region: {str(e)}")
+        return f"Error pasting arrangement region: {str(e)}"
+
+@mcp.tool()
+def duplicate_arrangement_region(ctx: Context) -> str:
+    """
+    Duplicate the currently selected arrangement region.
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("duplicate_arrangement_region")
+        return "Duplicated selected arrangement region"
+    except Exception as e:
+        logger.error(f"Error duplicating arrangement region: {str(e)}")
+        return f"Error duplicating arrangement region: {str(e)}"
+
+@mcp.tool()
+def add_locator(ctx: Context, time: float, name: str) -> str:
+    """
+    Add a locator/marker at a specific time in the arrangement.
+    
+    Parameters:
+    - time: The time position in beats
+    - name: The name for the locator
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("add_locator", {
+            "time": time,
+            "name": name
+        })
+        return f"Added locator '{name}' at {time} beats"
+    except Exception as e:
+        logger.error(f"Error adding locator: {str(e)}")
+        return f"Error adding locator: {str(e)}"
+
+@mcp.tool()
+def jump_to_locator(ctx: Context, index: int) -> str:
+    """
+    Jump to a specific locator by index.
+    
+    Parameters:
+    - index: The index of the locator to jump to
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("jump_to_locator", {"index": index})
+        return f"Jumped to locator at index {index}"
+    except Exception as e:
+        logger.error(f"Error jumping to locator: {str(e)}")
+        return f"Error jumping to locator: {str(e)}"
+
+@mcp.tool()
+def get_locators(ctx: Context) -> str:
+    """
+    Get all locators/markers in the arrangement.
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_locators")
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting locators: {str(e)}")
+        return f"Error getting locators: {str(e)}"
+
+# VST/AU Plugin Functions
+
+@mcp.tool()
+def get_available_plugins(ctx: Context, plugin_type: str = "all") -> str:
+    """
+    Get a list of available VST/AU plugins.
+    
+    Parameters:
+    - plugin_type: Type of plugins to list ('vst', 'vst3', 'au', 'all')
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_available_plugins", {
+            "plugin_type": plugin_type
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting available plugins: {str(e)}")
+        return f"Error getting available plugins: {str(e)}"
+
+@mcp.tool()
+def load_vst_plugin(
+    ctx: Context,
+    track_index: int,
+    plugin_name: str,
+    plugin_type: str = "auto"
+) -> str:
+    """
+    Load a VST/AU plugin onto a track.
+    
+    Parameters:
+    - track_index: The index of the track to load the plugin on
+    - plugin_name: The name of the plugin to load
+    - plugin_type: The plugin format ('vst', 'vst3', 'au', 'auto')
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("load_vst_plugin", {
+            "track_index": track_index,
+            "plugin_name": plugin_name,
+            "plugin_type": plugin_type
+        })
+        return f"Loaded {plugin_type} plugin '{plugin_name}' on track {track_index}"
+    except Exception as e:
+        logger.error(f"Error loading VST plugin: {str(e)}")
+        return f"Error loading VST plugin: {str(e)}"
+
+@mcp.tool()
+def get_plugin_parameters(
+    ctx: Context,
+    track_index: int,
+    device_index: int
+) -> str:
+    """
+    Get all parameters for a VST/AU plugin device.
+    
+    Parameters:
+    - track_index: The index of the track containing the plugin
+    - device_index: The index of the device in the track's device chain
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_plugin_parameters", {
+            "track_index": track_index,
+            "device_index": device_index
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting plugin parameters: {str(e)}")
+        return f"Error getting plugin parameters: {str(e)}"
+
+@mcp.tool()
+def set_plugin_parameter(
+    ctx: Context,
+    track_index: int,
+    device_index: int,
+    parameter_index: int,
+    value: float
+) -> str:
+    """
+    Set a parameter value for a VST/AU plugin.
+    
+    Parameters:
+    - track_index: The index of the track containing the plugin
+    - device_index: The index of the device in the track's device chain
+    - parameter_index: The index of the parameter to set
+    - value: The parameter value (0.0 to 1.0)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_plugin_parameter", {
+            "track_index": track_index,
+            "device_index": device_index,
+            "parameter_index": parameter_index,
+            "value": value
+        })
+        return f"Set parameter {parameter_index} to {value}"
+    except Exception as e:
+        logger.error(f"Error setting plugin parameter: {str(e)}")
+        return f"Error setting plugin parameter: {str(e)}"
 
 # Main execution
 def main():
